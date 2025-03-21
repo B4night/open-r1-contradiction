@@ -5,12 +5,12 @@ import json
 import math
 import re
 from typing import Dict
+import logging
 
 from latex2sympy2_extended import NormalizationConfig
 from math_verify import LatexExtractionConfig, parse, verify
 
 from .utils import is_e2b_available
-from .utils.ioi import SubtaskResult, add_includes, get_piston_client_from_env, score_subtask
 
 
 if is_e2b_available():
@@ -22,48 +22,58 @@ else:
     AsyncSandbox = None
 
 
-def accuracy_reward(completions, solution, **kwargs):
+def accuracy_reward(completions, classification, **kwargs):
+    logging.info("Accuracy reward function")
+    logging.info("completions: %s", completions)
+    logging.info("solution: %s", classification)
+
     """Reward function that checks if the completion is the same as the ground truth."""
     contents = [completion[0]["content"] for completion in completions]
     rewards = []
-    for content, sol in zip(contents, solution):
-        gold_parsed = parse(
-            sol,
-            extraction_mode="first_match",
-            extraction_config=[LatexExtractionConfig()],
-        )
-        if len(gold_parsed) != 0:
-            # We require the answer to be provided in correct latex (no malformed operators)
-            answer_parsed = parse(
-                content,
-                extraction_config=[
-                    LatexExtractionConfig(
-                        normalization_config=NormalizationConfig(
-                            nits=False,
-                            malformed_operators=False,
-                            basic_latex=True,
-                            equations=True,
-                            boxed="all",
-                            units=True,
-                        ),
-                        # Ensures that boxed is tried first
-                        boxed_match_priority=0,
-                        try_extract_without_anchor=False,
-                    )
-                ],
-                extraction_mode="first_match",
-            )
-            # Reward 1 if the content is the same as the ground truth, 0 otherwise
-            try:
-                reward = float(verify(answer_parsed, gold_parsed))
-            except Exception as e:
-                print(f"verify failed: {e}, answer: {answer_parsed}, gold: {gold_parsed}")
-                reward = 0.0
+    for content, sol in zip(contents, classification):
+        if content == sol:
+            rewards.append(1.0)
         else:
-            # If the gold solution is not parseable, we reward 1 to skip this example
-            reward = 1.0
-            print("Failed to parse gold solution: ", sol)
-        rewards.append(reward)
+            rewards.append(0.0)
+    # for content, sol in zip(contents, classification):
+    #     gold_parsed = parse(
+    #         sol,
+    #         extraction_mode="first_match",
+    #         extraction_config=[LatexExtractionConfig()],
+    #     )
+    #     if len(gold_parsed) != 0:
+    #         # We require the answer to be provided in correct latex (no malformed operators)
+    #         answer_parsed = parse(
+    #             content,
+    #             extraction_config=[
+    #                 LatexExtractionConfig(
+    #                     normalization_config=NormalizationConfig(
+    #                         nits=False,
+    #                         malformed_operators=False,
+    #                         basic_latex=True,
+    #                         equations=True,
+    #                         boxed="all",
+    #                         units=True,
+    #                     ),
+    #                     # Ensures that boxed is tried first
+    #                     boxed_match_priority=0,
+    #                     try_extract_without_anchor=False,
+    #                 )
+    #             ],
+    #             extraction_mode="first_match",
+    #         )
+    #         # Reward 1 if the content is the same as the ground truth, 0 otherwise
+    #         try:
+    #             reward = float(verify(answer_parsed, gold_parsed))
+    #         except Exception as e:
+    #             print(
+    #                 f"verify failed: {e}, answer: {answer_parsed}, gold: {gold_parsed}")
+    #             reward = 0.0
+    #     else:
+    #         # If the gold solution is not parseable, we reward 1 to skip this example
+    #         reward = 1.0
+    #         print("Failed to parse gold solution: ", sol)
+    #     rewards.append(reward)
 
     return rewards
 
@@ -71,8 +81,10 @@ def accuracy_reward(completions, solution, **kwargs):
 def format_reward(completions, **kwargs):
     """Reward function that checks if the reasoning process is enclosed within <think> and </think> tags, while the final answer is enclosed within <answer> and </answer> tags."""
     pattern = r"^<think>\n.*?\n</think>\n<answer>\n.*?\n</answer>$"
-    completion_contents = [completion[0]["content"] for completion in completions]
-    matches = [re.match(pattern, content, re.DOTALL | re.MULTILINE) for content in completion_contents]
+    completion_contents = [completion[0]["content"]
+                           for completion in completions]
+    matches = [re.match(pattern, content, re.DOTALL | re.MULTILINE)
+               for content in completion_contents]
     return [1.0 if match else 0.0 for match in matches]
 
 
@@ -108,8 +120,10 @@ def reasoning_steps_reward(completions, **kwargs):
         First,|Second,|Next,|Finally, - matches transition words
     """
     pattern = r"(Step \d+:|^\d+\.|\n-|\n\*|First,|Second,|Next,|Finally,)"
-    completion_contents = [completion[0]["content"] for completion in completions]
-    matches = [len(re.findall(pattern, content)) for content in completion_contents]
+    completion_contents = [completion[0]["content"]
+                           for completion in completions]
+    matches = [len(re.findall(pattern, content))
+               for content in completion_contents]
 
     # Magic number 3 to encourage 3 steps and more, otherwise partial reward
     return [min(1.0, count / 3) for count in matches]
@@ -216,7 +230,8 @@ def get_cosine_scaled_reward(
         rewards = []
 
         for content, sol in zip(contents, solution):
-            gold_parsed = parse(sol, extraction_mode="first_match", extraction_config=[LatexExtractionConfig()])
+            gold_parsed = parse(sol, extraction_mode="first_match", extraction_config=[
+                                LatexExtractionConfig()])
             if len(gold_parsed) == 0:
                 rewards.append(1.0)  # Skip unparseable examples
                 print("Failed to parse gold solution: ", sol)
@@ -313,55 +328,8 @@ def get_repetition_penalty_reward(ngram_size: int, max_penalty: float):
     return repetition_penalty_reward
 
 
-def _init_event_loop():
-    try:
-        loop = asyncio.get_event_loop()
-    except RuntimeError:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-    return loop
-
-
-def ioi_code_reward(completions, test_batch_size: int = 1, **kwargs) -> list[float]:
-    """Reward function that evaluates IOI problems using Piston+our IOI package.
-
-    Assumes the dataset has the same format as hf.co/datasets/open-r1/ioi
-
-    test_batch_size: evaluate these many test cases in parallel, then check if any of them failed (0 score): if so stop evaluating; otherwise continue with the next batch of test cases.
-    """
-    # for info on setting up piston workers, see slurm/piston/README.md
-    piston_client = get_piston_client_from_env()
-
-    code_snippets = [
-        # note: grading is automatically skipped if no code is extracted
-        add_includes(extract_code(completion[-1]["content"], "cpp"), problem_id)
-        for completion, problem_id in zip(completions, kwargs["id"])
-    ]
-
-    async def run_catch_exceptions(task):
-        try:
-            return await task
-        except Exception as e:
-            print(f"Error from Piston worker: {e}")
-            return SubtaskResult()  # score 0.0
-
-    # load problem data. undo separating kwargs by column
-    problems_data = [dict(zip(kwargs.keys(), values)) for values in zip(*kwargs.values())]
-
-    loop = _init_event_loop()
-    evals = [
-        loop.create_task(
-            run_catch_exceptions(score_subtask(piston_client, problem_data, code, test_batch_size=test_batch_size))
-        )
-        for problem_data, code in zip(problems_data, code_snippets)
-    ]
-    results = loop.run_until_complete(asyncio.gather(*evals))
-
-    return [result.score for result in results]
-
-
-def extract_code(completion: str, language: str = "python") -> str:
-    pattern = re.compile(rf"```{language}\n(.*?)```", re.DOTALL)
+def extract_code(completion: str) -> str:
+    pattern = re.compile(r"```python\n(.*?)```", re.DOTALL)
     matches = pattern.findall(completion)
     extracted_answer = matches[-1] if len(matches) >= 1 else ""
     return extracted_answer
@@ -419,17 +387,20 @@ def code_reward(completions, **kwargs) -> list[float]:
 
     evaluate_code(code_snippet, test_cases)
     """
-    code_snippets = [extract_code(completion[-1]["content"]) for completion in completions]
+    code_snippets = [extract_code(completion[-1]["content"])
+                     for completion in completions]
     verification_info = kwargs["verification_info"]
     scripts = [
-        evaluation_script_template.format(code=json.dumps(code), test_cases=json.dumps(json.dumps(info["test_cases"])))
+        evaluation_script_template.format(code=json.dumps(
+            code), test_cases=json.dumps(json.dumps(info["test_cases"])))
         for code, info in zip(code_snippets, verification_info)
     ]
 
     language = verification_info[0]["language"]
 
     if not all(v["language"] == language for v in verification_info):
-        raise ValueError("All verification_info must have the same language", verification_info)
+        raise ValueError(
+            "All verification_info must have the same language", verification_info)
     try:
         rewards = run_async_from_sync(scripts, language)
 
@@ -449,8 +420,10 @@ def get_code_format_reward(language: str = "python"):
     pattern = rf"^<think>\n.*?\n</think>\n<answer>\n.*?```{language}.*?```.*?\n</answer>$"
 
     def code_format_reward(completions, **kwargs):
-        completion_contents = [completion[0]["content"] for completion in completions]
-        matches = [re.match(pattern, content, re.DOTALL | re.MULTILINE) for content in completion_contents]
+        completion_contents = [completion[0]["content"]
+                               for completion in completions]
+        matches = [re.match(pattern, content, re.DOTALL | re.MULTILINE)
+                   for content in completion_contents]
         return [1.0 if match else 0.0 for match in matches]
 
     return code_format_reward

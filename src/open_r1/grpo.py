@@ -16,12 +16,11 @@ import logging
 import os
 import sys
 from dataclasses import dataclass, field
-from functools import partial, update_wrapper
 
 import datasets
 import torch
 import transformers
-from datasets import load_dataset
+from datasets import load_dataset, load_from_disk
 from transformers import set_seed
 from transformers.trainer_utils import get_last_checkpoint
 
@@ -33,7 +32,6 @@ from open_r1.rewards import (
     get_code_format_reward,
     get_cosine_scaled_reward,
     get_repetition_penalty_reward,
-    ioi_code_reward,
     len_reward,
     reasoning_steps_reward,
     tag_count_reward,
@@ -54,7 +52,7 @@ class GRPOScriptArguments(ScriptArguments):
 
     Args:
         reward_funcs (`list[str]`):
-            List of reward functions. Possible values: 'accuracy', 'format', 'reasoning_steps', 'cosine', 'repetition_penalty', 'length', 'tag_count', 'code', 'ioi_code', 'code_format'.
+            List of reward functions. Possible values: 'accuracy', 'format', 'reasoning_steps', 'cosine', 'repetition_penalty', 'length', 'tag_count', 'code', 'code_format'.
         cosine_min_value_wrong (`float`):
             Minimum reward for cosine scaling for wrong answers.
         cosine_max_value_wrong (`float`):
@@ -101,19 +99,14 @@ class GRPOScriptArguments(ScriptArguments):
     )
     repetition_max_penalty: float = field(
         default=-1.0,
-        metadata={"help": "Maximum (negative) penalty for for repetition penalty reward"},
+        metadata={
+            "help": "Maximum (negative) penalty for for repetition penalty reward"},
     )
     code_language: str = field(
         default="python",
         metadata={
             "help": "Language for code format reward. Based on E2B supported languages https://e2b.dev/docs/code-interpreting/supported-languages",
-            "choices": ["python", "javascript", "r", "java", "bash", "cpp"],
-        },
-    )
-    code_eval_test_batch_size: int = field(
-        default=1,
-        metadata={
-            "help": "for each generation, evaluate these many test cases in parallel, then check if any of them failed (0 score): if so stop evaluating; otherwise continue with the next batch of test cases. Useful to avoid overloading the eval server + save time on wrong solutions"
+            "choices": ["python", "javascript", "r", "java", "bash"],
         },
     )
 
@@ -151,13 +144,17 @@ def main(script_args, training_args, model_args):
     if os.path.isdir(training_args.output_dir):
         last_checkpoint = get_last_checkpoint(training_args.output_dir)
     if last_checkpoint is not None and training_args.resume_from_checkpoint is None:
-        logger.info(f"Checkpoint detected, resuming training at {last_checkpoint=}.")
+        logger.info(
+            f"Checkpoint detected, resuming training at {last_checkpoint=}.")
 
     if "wandb" in training_args.report_to:
         init_wandb_training(training_args)
 
     # Load the dataset
-    dataset = load_dataset(script_args.dataset_name, name=script_args.dataset_config)
+    # dataset = load_dataset(script_args.dataset_name,
+    #                        name=script_args.dataset_config)
+    dataset = load_from_disk(script_args.dataset_name)
+    logger.info(f"Dataset loaded: {dataset}")
 
     ################
     # Load tokenizer
@@ -181,23 +178,26 @@ def main(script_args, training_args, model_args):
             max_penalty=script_args.repetition_max_penalty,
         ),
         "length": len_reward,
-        "code": code_reward,
-        "ioi_code": update_wrapper(
-            partial(ioi_code_reward, test_batch_size=script_args.code_eval_test_batch_size), ioi_code_reward
-        ),
-        "code_format": get_code_format_reward(language=script_args.code_language),
+        # "code": code_reward,
+        # "code_format": get_code_format_reward(language=script_args.code_language),
         "tag_count": tag_count_reward,
     }
-    reward_funcs = [REWARD_FUNCS_REGISTRY[func] for func in script_args.reward_funcs]
+    reward_funcs = [REWARD_FUNCS_REGISTRY[func]
+                    for func in script_args.reward_funcs]
 
     # Format into conversation
     def make_conversation(example):
         prompt = []
 
         if training_args.system_prompt is not None:
-            prompt.append({"role": "system", "content": training_args.system_prompt})
+            prompt.append(
+                {"role": "system", "content": training_args.system_prompt})
 
-        prompt.append({"role": "user", "content": example["problem"]})
+        prompt.append({
+            "role": "user",
+            "content": f'{example["messages"]}Does this text contain a contradiction?'
+            # "content": example["problem"]
+        })
         return {"prompt": prompt}
 
     dataset = dataset.map(make_conversation)
@@ -208,7 +208,8 @@ def main(script_args, training_args, model_args):
 
     logger.info("*** Initializing model kwargs ***")
     torch_dtype = (
-        model_args.torch_dtype if model_args.torch_dtype in ["auto", None] else getattr(torch, model_args.torch_dtype)
+        model_args.torch_dtype if model_args.torch_dtype in [
+            "auto", None] else getattr(torch, model_args.torch_dtype)
     )
     model_kwargs = dict(
         revision=model_args.model_revision,
@@ -219,6 +220,9 @@ def main(script_args, training_args, model_args):
     )
     training_args.model_init_kwargs = model_kwargs
 
+    logger.info(f"Dataset: {dataset}")
+    logger.info(f"Train dataset example: {dataset['train'][0]}")
+    # logger.info(f"Test dataset example: {dataset['test'][0]}")
     #############################
     # Initialize the GRPO trainer
     #############################
