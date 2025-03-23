@@ -21,6 +21,11 @@ if is_e2b_available():
 else:
     AsyncSandbox = None
 
+# CONTRADICTION_KEYWORDS = {"has contradiction",
+#                           "contains contradiction", "is contradictory", "contradicts"}
+NO_CONTRADICTION_KEYWORDS = {"has no contradiction",
+                             "contains no contradiction", "is not contradictory", "does not contradict", "does not contain"}
+
 
 def accuracy_reward(completions, classification, **kwargs):
     logging.info("Accuracy reward function")
@@ -30,51 +35,20 @@ def accuracy_reward(completions, classification, **kwargs):
     """Reward function that checks if the completion is the same as the ground truth."""
     contents = [completion[0]["content"] for completion in completions]
     rewards = []
-    for content, sol in zip(contents, classification):
-        if content == sol:
-            rewards.append(1.0)
-        else:
-            rewards.append(0.0)
-    # for content, sol in zip(contents, classification):
-    #     gold_parsed = parse(
-    #         sol,
-    #         extraction_mode="first_match",
-    #         extraction_config=[LatexExtractionConfig()],
-    #     )
-    #     if len(gold_parsed) != 0:
-    #         # We require the answer to be provided in correct latex (no malformed operators)
-    #         answer_parsed = parse(
-    #             content,
-    #             extraction_config=[
-    #                 LatexExtractionConfig(
-    #                     normalization_config=NormalizationConfig(
-    #                         nits=False,
-    #                         malformed_operators=False,
-    #                         basic_latex=True,
-    #                         equations=True,
-    #                         boxed="all",
-    #                         units=True,
-    #                     ),
-    #                     # Ensures that boxed is tried first
-    #                     boxed_match_priority=0,
-    #                     try_extract_without_anchor=False,
-    #                 )
-    #             ],
-    #             extraction_mode="first_match",
-    #         )
-    #         # Reward 1 if the content is the same as the ground truth, 0 otherwise
-    #         try:
-    #             reward = float(verify(answer_parsed, gold_parsed))
-    #         except Exception as e:
-    #             print(
-    #                 f"verify failed: {e}, answer: {answer_parsed}, gold: {gold_parsed}")
-    #             reward = 0.0
-    #     else:
-    #         # If the gold solution is not parseable, we reward 1 to skip this example
-    #         reward = 1.0
-    #         print("Failed to parse gold solution: ", sol)
-    #     rewards.append(reward)
+    for content, label in zip(contents, classification):
+        # has_contradiction = any(
+        #     keyword in content for keyword in CONTRADICTION_KEYWORDS)
+        has_no_contradiction = any(
+            keyword in content for keyword in NO_CONTRADICTION_KEYWORDS)
 
+        if has_no_contradiction and label == 0:
+            reward = 1.0
+        elif not has_no_contradiction and label == 1:
+            reward = 1.0
+        else:
+            reward = 0.0
+
+        rewards.append(reward)
     return rewards
 
 

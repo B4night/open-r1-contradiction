@@ -195,7 +195,7 @@ def main(script_args, training_args, model_args):
 
         prompt.append({
             "role": "user",
-            "content": f'{example["messages"]}Does this text contain a contradiction?'
+            "content": f'{example["messages"]}\nDoes this text contain a contradiction?'
             # "content": example["problem"]
         })
         return {"prompt": prompt}
